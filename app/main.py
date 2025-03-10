@@ -70,13 +70,113 @@ def load_model():
 # Try to load model on startup
 model_loaded = load_model()
 
-# Rest of your existing code remains the same...
+#change update 0.02
+# Pydantic Models for Request/Response
+class TextRequest(BaseModel):
+    text: str
 
+class Entity(BaseModel):
+    text: str
+    label: str
+    start: int
+    end: int
+
+class PredictionResponse(BaseModel):
+    entities: List[Entity]
+    text: str
+
+
+#difining endpoints, start with root
 @app.get("/")
 def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-# ... (rest of the code remains the same)
+#adding update remaining 0.03
+@app.get("/uipredict")
+def get_form(request: Request):
+    return templates.TemplateResponse("form.html", {"request": request})
+
+@app.post("/predict/", response_model=PredictionResponse)
+async def predict(request: TextRequest):
+    global model, word2idx, label_encoder
+    
+    if not model_loaded:
+        raise HTTPException(status_code=500, detail="Model not loaded")
+    
+    try:
+        # Tokenize input
+        tokens = request.text.split()
+        
+        # Convert tokens to ids
+        token_ids = [word2idx.get(token.lower(), word2idx['<UNK>']) 
+                    for token in tokens]
+        
+        # Create tensor
+        input_ids = torch.tensor([token_ids], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        
+        # Get predictions
+        with torch.no_grad():
+            predictions = model(input_ids, mask=attention_mask)
+        
+        # Convert predictions to labels
+        pred_labels = [label_encoder.inverse_transform([p])[0] for p in predictions[0]]
+        
+        # Extract entities
+        entities = []
+        current_entity = None
+        
+        for i, (token, label) in enumerate(zip(tokens, pred_labels)):
+            if isinstance(label, str) and label.startswith('B-'):
+                if current_entity:
+                    entities.append(Entity(**current_entity))
+                current_entity = {
+                    'text': token,
+                    'label': label[2:],
+                    'start': i,
+                    'end': i + 1
+                }
+            elif isinstance(label, str) and label.startswith('I-') and current_entity:
+                current_entity['text'] += f" {token}"
+                current_entity['end'] = i + 1
+            elif label == 'O':
+                if current_entity:
+                    entities.append(Entity(**current_entity))
+                    current_entity = None
+        
+        if current_entity:
+            entities.append(Entity(**current_entity))
+        
+        return PredictionResponse(
+            entities=entities,
+            text=request.text
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict")
+async def process_prediction(request: Request):
+    form = await request.form()
+    text = form.get('text', '')
+    
+    try:
+        # Call the predict function
+        prediction = await predict(TextRequest(text=text))
+        
+        # Render output template with prediction results
+        return templates.TemplateResponse("output.html", {
+            "request": request, 
+            "text": text, 
+            "entities": prediction.entities
+        })
+    except Exception as e:
+        return templates.TemplateResponse("output.html", {
+            "request": request, 
+            "text": text, 
+            "error": str(e)
+        })
+
 
 # Add a health check endpoint
 @app.get("/health")
